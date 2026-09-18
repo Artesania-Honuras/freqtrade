@@ -7,6 +7,9 @@ function echo_block() {
     echo "----------------------------"
 }
 UV=false
+# Supported Python minor versions (order matters for detection)
+SUPPORTED_MINOR_VERS=(14 13 12 11)
+SUPPORTED_PY_VERSIONS="3.11, 3.12, 3.13 and 3.14"
 
 function check_installed_pip() {
    ${PYTHON} -m pip > /dev/null
@@ -33,7 +36,7 @@ function check_installed_python() {
         return
     fi
 
-    for v in 13 12 11
+    for v in "${SUPPORTED_MINOR_VERS[@]}"
     do
         PYTHON="python3.${v}"
         which $PYTHON
@@ -45,7 +48,7 @@ function check_installed_python() {
         fi
     done
 
-    echo "No usable python found. Please make sure to have python3.11 or newer installed."
+    echo "No usable python found. Supported versions are: ${SUPPORTED_PY_VERSIONS}. Please install one of these."
     exit 1
 }
 
@@ -92,7 +95,7 @@ function updateenv() {
         read -p "Do you want to install dependencies for freqai [y/N]? "
         if [[ $REPLY =~ ^[Yy]$ ]]
         then
-            REQUIREMENTS_FREQAI="-r requirements-freqai.txt --use-pep517"
+            REQUIREMENTS_FREQAI="-r requirements-freqai.txt"
             read -p "Do you also want dependencies for freqai-rl or PyTorch (~700mb additional space required) [y/N]? "
             if [[ $REPLY =~ ^[Yy]$ ]]
             then
@@ -251,7 +254,7 @@ function install() {
         install_redhat
     else
         echo "This script does not support your OS."
-        echo "If you have Python version 3.11 - 3.13, pip, virtualenv installed you can continue."
+        echo "If you have Python version 3.11 - 3.14, pip, virtualenv installed you can continue."
         echo "Wait 10 seconds to continue the next install steps or use ctrl+c to interrupt this shell."
         sleep 10
     fi

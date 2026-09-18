@@ -5,7 +5,6 @@ Provides pair white list as it configured in config
 """
 
 import logging
-from copy import deepcopy
 
 from cachetools import LRUCache
 
@@ -27,15 +26,6 @@ class StaticPairList(IPairList):
         self._allow_inactive = self._pairlistconfig.get("allow_inactive", False)
         # Pair cache - only used for optimize modes
         self._bt_pair_cache: LRUCache = LRUCache(maxsize=1)
-
-    @property
-    def needstickers(self) -> bool:
-        """
-        Boolean property defining if tickers are necessary.
-        If no Pairlist requires tickers, an empty Dict is passed
-        as tickers argument to filter_pairlist
-        """
-        return False
 
     def short_desc(self) -> str:
         """
@@ -91,7 +81,7 @@ class StaticPairList(IPairList):
         :param tickers: Tickers (from exchange.get_tickers). May be cached.
         :return: new whitelist
         """
-        pairlist_ = deepcopy(pairlist)
+        pairlist_ = pairlist.copy()
         for pair in self._config["exchange"]["pair_whitelist"]:
             if pair not in pairlist_:
                 pairlist_.append(pair)

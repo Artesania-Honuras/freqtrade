@@ -13,6 +13,7 @@ from freqtrade.strategy.parameters import (
     IntParameter,
     RealParameter,
 )
+from tests.conftest import log_has_re
 
 
 def test_hyperopt_int_parameter():
@@ -43,6 +44,7 @@ def test_hyperopt_int_parameter():
 
     HyperoptStateContainer.set_state(HyperoptState.OPTIMIZE)
     assert len(list(intpar.range)) == 1
+    assert intpar.param_type == "IntParameter"
 
 
 def test_hyperopt_real_parameter():
@@ -60,11 +62,11 @@ def test_hyperopt_real_parameter():
     assert isinstance(fltpar.get_space(""), FloatDistribution)
 
     assert not hasattr(fltpar, "range")
+    assert fltpar.param_type == "RealParameter"
 
 
 def test_hyperopt_decimal_parameter():
     HyperoptStateContainer.set_state(HyperoptState.INDICATORS)
-    # TODO: Check for get_space??
     from freqtrade.optimize.space import SKDecimal
 
     with pytest.raises(OperationalException, match=r"DecimalParameter space must be.*"):
@@ -95,6 +97,7 @@ def test_hyperopt_decimal_parameter():
 
     HyperoptStateContainer.set_state(HyperoptState.OPTIMIZE)
     assert len(list(decimalpar.range)) == 1
+    assert decimalpar.param_type == "DecimalParameter"
 
 
 def test_hyperopt_categorical_parameter():
@@ -134,3 +137,52 @@ def test_hyperopt_categorical_parameter():
     HyperoptStateContainer.set_state(HyperoptState.OPTIMIZE)
     assert len(list(catpar.range)) == 1
     assert len(list(boolpar.range)) == 1
+    assert boolpar.param_type == "BooleanParameter"
+    assert catpar.param_type == "CategoricalParameter"
+
+
+def test_hyperopt_parameter_static_indicator_warning(caplog):
+    warning_re = r"Parameter 'rsi_period' is part of this hyperopt run.*"
+    HyperoptStateContainer.set_state(HyperoptState.INDICATORS)
+    intpar = IntParameter(low=3, high=25, default=14, space="buy")
+    intpar.name = "rsi_period"
+
+    # Parameter not part of the current optimization job - no warning.
+    assert intpar.value == 14
+    assert not log_has_re(warning_re, caplog)
+
+    intpar.in_space = True
+    # Accessing `.range` is the documented approach - no warning.
+    assert len(list(intpar.range)) == 23
+    assert not log_has_re(warning_re, caplog)
+
+    # Reading `.value` of an optimized parameter during indicator calculation warns.
+    assert intpar.value == 14
+    assert log_has_re(warning_re, caplog)
+    caplog.clear()
+
+    # Warning is only issued once per parameter.
+    assert intpar.value == 14
+    assert not log_has_re(warning_re, caplog)
+
+    # No warning for parameters with optimize=False.
+    intpar2 = IntParameter(low=3, high=25, default=14, space="buy", optimize=False)
+    intpar2.name = "rsi_period"
+    intpar2.in_space = True
+    assert intpar2.value == 14
+    assert not log_has_re(warning_re, caplog)
+
+    # No warning outside of the INDICATORS state (regular backtesting / per-epoch analysis).
+    HyperoptStateContainer.set_state(HyperoptState.OPTIMIZE)
+    decpar = DecimalParameter(low=0.01, high=0.05, default=0.02, space="buy")
+    decpar.name = "decpar"
+    decpar.in_space = True
+    assert decpar.value == 0.02
+    assert not log_has_re(r"Parameter 'decpar'.*", caplog)
+
+    # DecimalParameter's value property warns as well.
+    HyperoptStateContainer.set_state(HyperoptState.INDICATORS)
+    assert decpar.value == 0.02
+    assert log_has_re(r"Parameter 'decpar'.*", caplog)
+
+    HyperoptStateContainer.set_state(HyperoptState.OPTIMIZE)

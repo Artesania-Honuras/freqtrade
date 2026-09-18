@@ -1,7 +1,7 @@
-from enum import Enum
+from enum import StrEnum
 
 
-class RPCMessageType(str, Enum):
+class RPCMessageType(StrEnum):
     STATUS = "status"
     WARNING = "warning"
     EXCEPTION = "exception"
@@ -18,6 +18,8 @@ class RPCMessageType(str, Enum):
     PROTECTION_TRIGGER = "protection_trigger"
     PROTECTION_TRIGGER_GLOBAL = "protection_trigger_global"
 
+    LIQUIDATION_WARNING = "liquidation_warning"
+
     STRATEGY_MSG = "strategy_msg"
 
     WHITELIST = "whitelist"
@@ -25,21 +27,16 @@ class RPCMessageType(str, Enum):
     NEW_CANDLE = "new_candle"
 
     def __repr__(self):
-        return self.value
-
-    def __str__(self):
+        # TODO: do we still need to overwrite __repr__? Impact needs to be looked at in detail
         return self.value
 
 
 # Enum for parsing requests from ws consumers
-class RPCRequestType(str, Enum):
+class RPCRequestType(StrEnum):
     SUBSCRIBE = "subscribe"
 
     WHITELIST = "whitelist"
     ANALYZED_DF = "analyzed_df"
-
-    def __str__(self):
-        return self.value
 
 
 NO_ECHO_MESSAGES = (RPCMessageType.ANALYZED_DF, RPCMessageType.WHITELIST, RPCMessageType.NEW_CANDLE)

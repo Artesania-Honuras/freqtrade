@@ -19,6 +19,8 @@ class FtHas(TypedDict, total=False):
     stop_price_type_value_mapping: dict
     stoploss_order_types: dict[str, str]
     stoploss_blocks_assets: bool
+    stoploss_query_requires_stop_flag: bool
+    stoploss_algo_order_info_id: str
     # ohlcv
     ohlcv_params: dict
     ohlcv_candle_limit: int
@@ -53,9 +55,14 @@ class FtHas(TypedDict, total=False):
     mark_ohlcv_timeframe: str
     funding_fee_timeframe: str
     funding_fee_candle_limit: int
+    open_interest_candle_limit: int
     floor_leverage: bool
     uses_leverage_tiers: bool
     needs_trading_fees: bool
+    # True if the balance "total" reported for the stake currency is account equity
+    # (wallet balance + unrealized PnL of open positions) instead of plain wallet balance.
+    # See Exchange.balance_includes_unrealized_pnl() for more details.
+    balance_includes_unrealized_pnl: bool
     order_props_in_contracts: list[Literal["amount", "cost", "filled", "remaining"]]
 
     proxy_coin_mapping: dict[str, str]
@@ -65,6 +72,8 @@ class FtHas(TypedDict, total=False):
 
     # Delisting check
     has_delisting: bool
+    # Demo mode - this is not sandbox but an exchange-provided demo mode.
+    supports_demo_trading: bool
 
 
 class Ticker(TypedDict):
@@ -112,6 +121,28 @@ class CcxtPosition(TypedDict):
 
 
 CcxtOrder = dict[str, Any]
+
+
+class LeverageTier(TypedDict):
+    """
+    Represents a single leverage tier returned by the exchange.
+
+    Attributes:
+        minNotional: Minimum notional value (quote currency) for which this tier applies.
+        maxNotional: Maximum notional value (quote currency) for which this tier applies.
+            When ``maxNotional`` is ``None``, the tier is unbounded on the upper side,
+            i.e. there is no maximum notional limit for this tier
+        maintenanceMarginRate: Maintenance margin rate for this tier (fraction, e.g. 0.005 for 0.5%)
+        maxLeverage: Maximum leverage allowed for this tier
+        maintAmt: Optional fixed maintenance margin amount, if provided by the exchange
+    """
+
+    minNotional: float
+    maxNotional: float | None
+    maintenanceMarginRate: float
+    maxLeverage: float
+    maintAmt: float | None
+
 
 # pair, timeframe, candleType, OHLCV, drop last?,
 OHLCVResponse = tuple[str, str, CandleType, list, bool]

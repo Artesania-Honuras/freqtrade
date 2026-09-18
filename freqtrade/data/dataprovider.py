@@ -95,7 +95,8 @@ class DataProvider:
         :param pair: pair to get the data for
         :param timeframe: Timeframe to get data for
         :param dataframe: analyzed dataframe
-        :param candle_type: Any of the enum CandleType (must match trading mode!)
+        :param candle_type: Candle type to use (spot, futures, funding_rate, ...)
+                            Must match the trading mode.
         """
         pair_key = (pair, timeframe, candle_type)
         self.__cached_pairs[pair_key] = (dataframe, datetime.now(UTC))
@@ -157,7 +158,8 @@ class DataProvider:
 
         :param pair: pair to get the data for
         :param timeframe: Timeframe to get data for
-        :param candle_type: Any of the enum CandleType (must match trading mode!)
+        :param candle_type: Candle type to use (spot, futures, funding_rate, ...)
+                            Must match the trading mode.
         """
         pair_key = (pair, timeframe, candle_type)
 
@@ -184,7 +186,8 @@ class DataProvider:
 
         :param pair: pair to get the data for
         :param timeframe: Timeframe to get data for
-        :param candle_type: Any of the enum CandleType (must match trading mode!)
+        :param candle_type: Candle type to use (spot, futures, funding_rate, ...)
+                            Must match the trading mode.
         :returns: False if the candle could not be appended, or the int number of missing candles.
         """
         pair_key = (pair, timeframe, candle_type)
@@ -264,7 +267,7 @@ class DataProvider:
 
         :param pair: pair to get the data for
         :param timeframe: Timeframe to get data for
-        :param candle_type: Any of the enum CandleType (must match trading mode!)
+        :param candle_type: Candle type to use (spot, futures, funding_rate, ...)
         :returns: Tuple of the DataFrame and last analyzed timestamp
         """
         _timeframe = self._default_timeframe if not timeframe else timeframe
@@ -297,7 +300,8 @@ class DataProvider:
         Get stored historical candle (OHLCV) data
         :param pair: pair to get the data for
         :param timeframe: timeframe to get data for
-        :param candle_type: '', mark, index, premiumIndex, or funding_rate
+        :param candle_type: Candle type to use (spot, futures, funding_rate, ...)
+                            '' (the default) resolves to the trading mode's candle type.
         """
         _candle_type = (
             CandleType.from_string(candle_type)
@@ -348,6 +352,22 @@ class DataProvider:
             )
         return total_candles
 
+    def __fix_funding_rate_timeframe(
+        self, pair: str, timeframe: str | None, candle_type: str
+    ) -> str | None:
+        if (
+            candle_type == CandleType.FUNDING_RATE
+            and (ff_tf := self.get_funding_rate_timeframe()) != timeframe
+        ):
+            # TODO: does this message make sense? might be pointless as funding fees don't
+            # have a timeframe
+            logger.warning(
+                f"{pair}, {timeframe} requested - funding rate timeframe not matching {ff_tf}."
+            )
+            return ff_tf
+
+        return timeframe
+
     def get_pair_dataframe(
         self, pair: str, timeframe: str | None = None, candle_type: str = ""
     ) -> DataFrame:
@@ -358,9 +378,11 @@ class DataProvider:
         will be available.
         :param pair: pair to get the data for
         :param timeframe: timeframe to get data for
+        :param candle_type: Candle type to use (spot, futures, funding_rate, ...)
+                            '' (the default) resolves to the trading mode's candle type.
         :return: Dataframe for this pair
-        :param candle_type: '', mark, index, premiumIndex, or funding_rate
         """
+        timeframe = self.__fix_funding_rate_timeframe(pair, timeframe, candle_type)
         if self.runmode in (RunMode.DRY_RUN, RunMode.LIVE):
             # Get live OHLCV data.
             data = self.ohlcv(pair=pair, timeframe=timeframe, candle_type=candle_type)
@@ -457,9 +479,8 @@ class DataProvider:
         """
 
         use_public_trades = self._config.get("exchange", {}).get("use_public_trades", False)
-        if use_public_trades:
-            if self._exchange:
-                self._exchange.refresh_latest_trades(pairlist)
+        if use_public_trades and self._exchange:
+            self._exchange.refresh_latest_trades(pairlist)
 
     @property
     def available_pairs(self) -> ListPairsWithTimeframes:
@@ -479,7 +500,8 @@ class DataProvider:
         Please use the `available_pairs` method to verify which pairs are currently cached.
         :param pair: pair to get the data for
         :param timeframe: Timeframe to get data for
-        :param candle_type: '', mark, index, premiumIndex, or funding_rate
+        :param candle_type: Candle type to use (spot, futures, funding_rate, ...)
+                            '' (the default) resolves to the trading mode's candle type.
         :param copy: copy dataframe before returning if True.
                      Use False only for read-only operations (where the dataframe is not modified)
         """
@@ -511,7 +533,8 @@ class DataProvider:
         This is not meant to be used in callbacks because of lookahead bias.
         :param pair: pair to get the data for
         :param timeframe: Timeframe to get data for
-        :param candle_type: '', mark, index, premiumIndex, or funding_rate
+        :param candle_type: Candle type to use (spot, futures, funding_rate, ...)
+                            '' (the default) resolves to the trading mode's candle type.
         :param copy: copy dataframe before returning if True.
                      Use False only for read-only operations (where the dataframe is not modified)
         """
@@ -620,3 +643,12 @@ class DataProvider:
         except ExchangeError:
             logger.warning(f"Could not fetch market data for {pair}. Assuming no delisting.")
             return None
+
+    def get_funding_rate_timeframe(self) -> str:
+        """
+        Get the funding rate timeframe from exchange options
+        :return: Timeframe string
+        """
+        if self._exchange is None:
+            raise OperationalException(NO_EXCHANGE_EXCEPTION)
+        return self._exchange.get_option("funding_fee_timeframe")

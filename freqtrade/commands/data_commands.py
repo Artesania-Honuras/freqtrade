@@ -68,7 +68,7 @@ def start_convert_trades(args: dict[str, Any]) -> None:
         p
         for p in exchange.get_markets(
             tradable_only=True, active_only=not config.get("include_inactive")
-        ).keys()
+        )
     ]
 
     expanded_pairs = dynamic_expand_pairlist(config, available_pairs)
@@ -223,7 +223,7 @@ def start_list_trades_data(args: dict[str, Any]) -> None:
                     end.strftime(DATETIME_PRINT_FORMAT),
                     str(length),
                 )
-                for pair, start, end, length in sorted(paircombs1, key=lambda x: (x[0]))
+                for pair, start, end, length in sorted(paircombs1, key=lambda x: x[0])
             ],
             ("Pair", "Type", "From", "To", "Trades"),
             summary=title,

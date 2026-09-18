@@ -1,12 +1,13 @@
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import ccxt
 
 from freqtrade.constants import BuySell
-from freqtrade.enums import CandleType, MarginMode, TradingMode
+from freqtrade.enums import OPTIMIZE_MODES, CandleType, MarginMode, PriceType, TradingMode
 from freqtrade.exceptions import (
     DDosProtection,
+    InvalidOrderException,
     OperationalException,
     RetryableOrderError,
     TemporaryError,
@@ -14,7 +15,7 @@ from freqtrade.exceptions import (
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.common import API_RETRY_COUNT, retrier
 from freqtrade.exchange.exchange_types import CcxtOrder, FtHas
-from freqtrade.util.datetime_helpers import dt_now, dt_ts
+from freqtrade.util import dt_from_ts, dt_now, dt_ts
 
 
 logger = logging.getLogger(__name__)
@@ -31,12 +32,22 @@ class Bitget(Exchange):
         "stop_price_prop": "stopPrice",
         "stoploss_blocks_assets": False,  # Stoploss orders do not block assets
         "stoploss_order_types": {"limit": "limit", "market": "market"},
+        "stoploss_query_requires_stop_flag": True,
         "ohlcv_candle_limit": 200,  # 200 for historical candles, 1000 for recent ones.
         "order_time_in_force": ["GTC", "FOK", "IOC", "PO"],
     }
     _ft_has_futures: FtHas = {
-        "mark_ohlcv_timeframe": "4h",
         "funding_fee_candle_limit": 100,
+        "has_delisting": True,
+        "stop_price_param": "stopLossPrice",
+        "stop_price_prop": "stopLossPrice",
+        "stop_price_type_field": "triggerType",
+        "stop_price_type_value_mapping": {
+            PriceType.LAST: "fill_price",
+            PriceType.MARK: "mark_price",
+        },
+        # ccxt maps "total" to accountEquity, which includes unrealized PnL
+        "balance_includes_unrealized_pnl": True,
     }
 
     _supported_trading_mode_margin_pairs: list[tuple[TradingMode, MarginMode]] = [
@@ -54,7 +65,7 @@ class Bitget(Exchange):
         * 1000 candles for up-to-date data
         * 200 candles for historic data (prior to a certain date)
         :param timeframe: Timeframe to check
-        :param candle_type: Candle-type
+        :param candle_type: Candle type to use (spot, futures, funding_rate, ...)
         :param since_ms: Starting timestamp
         :return: Candle limit as integer
         """
@@ -93,30 +104,36 @@ class Bitget(Exchange):
         return order
 
     def _fetch_stop_order_fallback(self, order_id: str, pair: str) -> CcxtOrder:
-        params2 = {
-            "stop": True,
-        }
-        for method in (
-            self._api.fetch_open_orders,
-            self._api.fetch_canceled_and_closed_orders,
-        ):
-            try:
-                orders = method(pair, params=params2)
-                orders_f = [order for order in orders if order["id"] == order_id]
-                if orders_f:
-                    order = orders_f[0]
-                    self._log_exchange_response("get_stop_order_fallback", order)
-                    return self._convert_stop_order(pair, order_id, order)
-            except (ccxt.OrderNotFound, ccxt.InvalidOrder):
-                pass
-            except ccxt.DDoSProtection as e:
-                raise DDosProtection(e) from e
-            except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
-                raise TemporaryError(
-                    f"Could not get order due to {e.__class__.__name__}. Message: {e}"
-                ) from e
-            except ccxt.BaseError as e:
-                raise OperationalException(e) from e
+        # old stoploss orders
+        paramsold = {"stop": True}
+        # new stoploss orders with stopLossPrice (used in futures starting 2026.4)
+        paramsnew = {"planType": "profit_loss"}
+        params_to_try = (
+            (paramsnew, paramsold) if self.trading_mode == TradingMode.FUTURES else (paramsold,)
+        )
+
+        for params2 in params_to_try:
+            for method in (
+                self._api.fetch_open_orders,
+                self._api.fetch_canceled_and_closed_orders,
+            ):
+                try:
+                    orders = method(pair, params=params2)
+                    orders_f = [order for order in orders if order["id"] == order_id]
+                    if orders_f:
+                        order = orders_f[0]
+                        self._log_exchange_response("get_stop_order_fallback", order)
+                        return self._convert_stop_order(pair, order_id, order)
+                except (ccxt.OrderNotFound, ccxt.InvalidOrder):
+                    pass
+                except ccxt.DDoSProtection as e:
+                    raise DDosProtection(e) from e
+                except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
+                    raise TemporaryError(
+                        f"Could not get order due to {e.__class__.__name__}. Message: {e}"
+                    ) from e
+                except ccxt.BaseError as e:
+                    raise OperationalException(e) from e
         raise RetryableOrderError(f"StoplossOrder not found (pair: {pair} id: {order_id}).")
 
     @retrier(retries=API_RETRY_COUNT)
@@ -129,7 +146,17 @@ class Bitget(Exchange):
         return self._fetch_stop_order_fallback(order_id, pair)
 
     def cancel_stoploss_order(self, order_id: str, pair: str, params: dict | None = None) -> dict:
-        return self.cancel_order(order_id=order_id, pair=pair, params={"stop": True})
+        cancel_params = params.copy() if params else {}
+        cancel_params["stop"] = True
+
+        if self.trading_mode != TradingMode.FUTURES:
+            return self.cancel_order(order_id, pair, cancel_params)
+
+        try:
+            return self.cancel_order(order_id, pair, {**cancel_params, "planType": "pos_loss"})
+        except (InvalidOrderException, IndexError):
+            # Keep compatibility with stoploss orders created by older versions.
+            return self.cancel_order(order_id, pair, cancel_params)
 
     @retrier
     def additional_exchange_init(self) -> None:
@@ -139,10 +166,9 @@ class Bitget(Exchange):
         Must be overridden in child methods if required.
         """
         try:
-            if not self._config["dry_run"]:
-                if self.trading_mode == TradingMode.FUTURES:
-                    position_mode = self._api.set_position_mode(False)
-                    self._log_exchange_response("set_position_mode", position_mode)
+            if not self._config["dry_run"] and self.trading_mode == TradingMode.FUTURES:
+                position_mode = self._api.set_position_mode(False)
+                self._log_exchange_response("set_position_mode", position_mode)
         except ccxt.DDoSProtection as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
@@ -151,12 +177,6 @@ class Bitget(Exchange):
             ) from e
         except ccxt.BaseError as e:
             raise OperationalException(e) from e
-
-    def _lev_prep(self, pair: str, leverage: float, side: BuySell, accept_fail: bool = False):
-        if self.trading_mode != TradingMode.SPOT:
-            # Explicitly setting margin_mode is not necessary as marginMode can be set per order.
-            # self.set_margin_mode(pair, self.margin_mode, accept_fail)
-            self._set_leverage(leverage, pair, accept_fail)
 
     def _get_params(
         self,
@@ -236,3 +256,35 @@ class Bitget(Exchange):
             raise OperationalException(
                 "Freqtrade currently only supports isolated futures for bitget"
             )
+
+    def check_delisting_time(self, pair: str) -> datetime | None:
+        """
+        Check if the pair gonna be delisted.
+        By default, it returns None.
+        :param pair: Market symbol
+        :return: Datetime if the pair gonna be delisted, None otherwise
+        """
+        if self._config["runmode"] in OPTIMIZE_MODES:
+            return None
+
+        if self.trading_mode == TradingMode.FUTURES:
+            return self._check_delisting_futures(pair)
+        return None
+
+    def _check_delisting_futures(self, pair: str) -> datetime | None:
+        delivery_time = self.markets.get(pair, {}).get("info", {}).get("limitOpenTime", None)
+        if delivery_time:
+            if isinstance(delivery_time, str) and (delivery_time != ""):
+                delivery_time = int(delivery_time)
+
+            if not isinstance(delivery_time, int) or delivery_time <= 0:
+                return None
+
+            max_delivery = dt_ts() + (
+                14 * 24 * 60 * 60 * 1000
+            )  # Assume exchange don't announce delisting more than 14 days in advance
+
+            if delivery_time < max_delivery:
+                return dt_from_ts(delivery_time)
+
+        return None

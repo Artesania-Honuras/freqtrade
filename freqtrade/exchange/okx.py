@@ -14,7 +14,6 @@ from freqtrade.exceptions import (
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.common import API_RETRY_COUNT, retrier
 from freqtrade.exchange.exchange_types import CcxtOrder, FtHas
-from freqtrade.misc import safe_value_fallback2
 from freqtrade.util import dt_now, dt_ts
 
 
@@ -29,10 +28,9 @@ class Okx(Exchange):
 
     _ft_has: FtHas = {
         "ohlcv_candle_limit": 100,  # Warning, special case with data prior to X months
-        "mark_ohlcv_timeframe": "4h",
-        "funding_fee_timeframe": "8h",
-        "stoploss_order_types": {"limit": "limit"},
+        "stoploss_order_types": {"limit": "limit", "market": "market"},
         "stoploss_on_exchange": True,
+        "stoploss_query_requires_stop_flag": True,
         "trades_has_history": False,  # Endpoint doesn't have a "since" parameter
         "ws_enabled": True,
     }
@@ -41,11 +39,13 @@ class Okx(Exchange):
         "stop_price_type_field": "slTriggerPxType",
         "stop_price_type_value_mapping": {
             PriceType.LAST: "last",
-            PriceType.MARK: "index",
-            PriceType.INDEX: "mark",
+            PriceType.MARK: "mark",
+            PriceType.INDEX: "index",
         },
         "stoploss_blocks_assets": False,
         "ws_enabled": True,
+        # ccxt maps "total" to the currency's "eq" (equity), which includes unrealized PnL
+        "balance_includes_unrealized_pnl": True,
     }
 
     _supported_trading_mode_margin_pairs: list[tuple[TradingMode, MarginMode]] = [
@@ -73,7 +73,7 @@ class Okx(Exchange):
         * additional data:
             * 100 candles for additional candles
         :param timeframe: Timeframe to check
-        :param candle_type: Candle-type
+        :param candle_type: Candle type to use (spot, futures, funding_rate, ...)
         :param since_ms: Starting timestamp
         :return: Candle limit as integer
         """
@@ -184,11 +184,16 @@ class Okx(Exchange):
             return float("inf")
 
         pair_tiers = self._leverage_tiers[pair]
-        return pair_tiers[-1]["maxNotional"] / leverage
+        last_max_notional = pair_tiers[-1]["maxNotional"]
+        if last_max_notional is None:
+            return float("inf")
+        return last_max_notional / leverage
 
     def _get_stop_params(self, side: BuySell, ordertype: str, stop_price: float) -> dict:
         params = super()._get_stop_params(side, ordertype, stop_price)
-        if self.trading_mode == TradingMode.FUTURES and self.margin_mode:
+        if self.trading_mode == TradingMode.SPOT:
+            params["tdMode"] = "cash"
+        elif self.trading_mode == TradingMode.FUTURES and self.margin_mode:
             params["tdMode"] = self.margin_mode.value
             params["posSide"] = self._get_posSide(side, True)
         return params
@@ -259,21 +264,6 @@ class Okx(Exchange):
             except ccxt.BaseError as e:
                 raise OperationalException(e) from e
         raise RetryableOrderError(f"StoplossOrder not found (pair: {pair} id: {order_id}).")
-
-    def get_order_id_conditional(self, order: CcxtOrder) -> str:
-        if order.get("type", "") == "stop":
-            return safe_value_fallback2(order, order, "id_stop", "id")
-        return order["id"]
-
-    def cancel_stoploss_order(self, order_id: str, pair: str, params: dict | None = None) -> dict:
-        params1 = {"stop": True}
-        # 'ordType': 'conditional'
-        #
-        return self.cancel_order(
-            order_id=order_id,
-            pair=pair,
-            params=params1,
-        )
 
     def _fetch_orders_emulate(self, pair: str, since_ms: int) -> list[CcxtOrder]:
         orders = []

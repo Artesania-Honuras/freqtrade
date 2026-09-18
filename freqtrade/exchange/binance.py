@@ -5,10 +5,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import ccxt
-from cachetools import TTLCache
 from pandas import DataFrame
 
-from freqtrade.constants import DEFAULT_DATAFRAME_COLUMNS
+from freqtrade.candle_columns import get_candle_columns
 from freqtrade.enums import TRADE_MODES, CandleType, MarginMode, PriceType, RunMode, TradingMode
 from freqtrade.exceptions import DDosProtection, OperationalException, TemporaryError
 from freqtrade.exchange import Exchange
@@ -21,6 +20,7 @@ from freqtrade.exchange.common import retrier
 from freqtrade.exchange.exchange_types import FtHas, Tickers
 from freqtrade.exchange.exchange_utils_timeframe import timeframe_to_msecs
 from freqtrade.misc import deep_merge_dicts, json_load
+from freqtrade.util import FtTTLCache
 from freqtrade.util.datetime_helpers import dt_from_ts, dt_ts
 
 
@@ -46,11 +46,19 @@ class Binance(Exchange):
         "l2_limit_range": [5, 10, 20, 50, 100, 500, 1000],
         "ws_enabled": True,
         "has_delisting": True,
+        # Demo trading
+        # https://www.binance.com/en/support/faq/detail/9be58f73e5e14338809e3b705b9687dd
+        # Intentionally Disabled as it's a separate market - not a simulated live market.
+        "supports_demo_trading": False,
     }
     _ft_has_futures: FtHas = {
+        "ohlcv_candle_limit": 499,
         "funding_fee_candle_limit": 1000,
+        "open_interest_candle_limit": 500,
         "stoploss_order_types": {"limit": "stop", "market": "stop_market"},
         "stoploss_blocks_assets": False,  # Stoploss orders do not block assets
+        "stoploss_query_requires_stop_flag": True,
+        "stoploss_algo_order_info_id": "actualOrderId",
         "tickers_have_price": False,
         "floor_leverage": True,
         "fetch_orders_limit_minutes": 7 * 1440,  # "fetch_orders" is limited to 7 days
@@ -61,11 +69,14 @@ class Binance(Exchange):
             PriceType.MARK: "MARK_PRICE",
         },
         "ws_enabled": False,
+        # ccxt maps "total" to assets[].marginBalance (= walletBalance + unrealizedProfit)
+        "balance_includes_unrealized_pnl": True,
         "proxy_coin_mapping": {
             "BNFCR": "USDC",
             "BFUSD": "USDT",
         },
     }
+    _can_use_data_download_fast = True
 
     _supported_trading_mode_margin_pairs: list[tuple[TradingMode, MarginMode]] = [
         (TradingMode.SPOT, MarginMode.NONE),
@@ -76,7 +87,7 @@ class Binance(Exchange):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._spot_delist_schedule_cache: TTLCache = TTLCache(maxsize=100, ttl=300)
+        self._spot_delist_schedule_cache: FtTTLCache = FtTTLCache(maxsize=100, ttl=300)
 
     def get_proxy_coin(self) -> str:
         """
@@ -157,7 +168,7 @@ class Binance(Exchange):
         """
         Overwrite to introduce "fast new pair" functionality by detecting the pair's listing date
         Does not work for other exchanges, which don't return the earliest data when called with "0"
-        :param candle_type: Any of the enum CandleType (must match trading mode!)
+        :param candle_type: Candle type to use (spot, futures, funding_rate, ...)
         """
         if is_new_pair and candle_type in (CandleType.SPOT, CandleType.FUTURES, CandleType.MARK):
             with self._loop_lock:
@@ -176,10 +187,11 @@ class Binance(Exchange):
                         f"No available candle-data for {pair} before "
                         f"{dt_from_ts(until_ms).isoformat()}"
                     )
-                    return DataFrame(columns=DEFAULT_DATAFRAME_COLUMNS)
+                    return DataFrame(columns=get_candle_columns(candle_type))
 
         if (
-            self._config["exchange"].get("only_from_ccxt", False)
+            not self._can_use_data_download_fast
+            or self._config["exchange"].get("only_from_ccxt", False)
             or
             # only download timeframes with significant improvements,
             # otherwise fall back to rest API
@@ -403,7 +415,10 @@ class Binance(Exchange):
     ) -> tuple[str, list[list]]:
         logger.info(f"Fetching trades for {pair} from Binance, {from_id=}, {since=}, {until=}")
 
-        if not self._config["exchange"].get("only_from_ccxt", False):
+        if (
+            not self._config["exchange"].get("only_from_ccxt", False)
+            and self._can_use_data_download_fast
+        ):
             if from_id is None or not since:
                 trades = await self._api_async.fetch_trades(
                     pair,
@@ -512,15 +527,14 @@ class Binance(Exchange):
         :return: int: delisting time None if not delisting
         """
 
-        if not pair or not self._config["runmode"] == RunMode.LIVE:
+        if not pair or self._config["runmode"] != RunMode.LIVE:
             # Endpoint only works in live mode as it requires API keys
             return None
 
         cache = self._spot_delist_schedule_cache
 
-        if not refresh:
-            if delist_time := cache.get(pair, None):
-                return delist_time
+        if not refresh and (delist_time := cache.get(pair, None)):
+            return delist_time
 
         delist_schedule = self._get_spot_delist_schedule()
 
@@ -544,3 +558,28 @@ class Binance(Exchange):
                 cache[ft_symbol] = delist_dt
 
         return cache.get(pair, None)
+
+
+class Binanceusdm(Binance):
+    """Binance USDM Exchange
+    Same as Binance - only futures trading is supported (via ccxt).
+
+    Not actually necessary, binance should be preferred.
+    """
+
+    _supported_trading_mode_margin_pairs: list[tuple[TradingMode, MarginMode]] = [
+        (TradingMode.FUTURES, MarginMode.CROSS),
+        (TradingMode.FUTURES, MarginMode.ISOLATED),
+    ]
+
+
+class Binanceus(Binance):
+    """Binance US exchange class.
+    Minimal adjustment to disable futures trading for the US subsidiary of Binance
+    """
+
+    _supported_trading_mode_margin_pairs: list[tuple[TradingMode, MarginMode]] = [
+        (TradingMode.SPOT, MarginMode.NONE),
+    ]
+    # binance vision does not have data for binanceus
+    _can_use_data_download_fast = False

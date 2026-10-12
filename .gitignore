@@ -122,3 +122,11 @@ target/
 !config_examples/config_freqai.example.json
 
 docker-compose-*.yml
+
+# Lanzadores locales de FREQTRADE (contienen credenciales de la demo; NO deben subirse)
+INICIAR_TODO.bat
+DETENER_FREQTRADE.bat
+MODO_TRADE_EN_VIVO.bat
+MODO_VER_BACKTEST.bat
+INICIAR_DRYRUN_FUTUROS.bat
+VENTANAS_FREQTRADE.ps1

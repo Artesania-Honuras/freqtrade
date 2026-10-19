@@ -130,3 +130,8 @@ MODO_TRADE_EN_VIVO.bat
 MODO_VER_BACKTEST.bat
 INICIAR_DRYRUN_FUTUROS.bat
 VENTANAS_FREQTRADE.ps1
+
+# Helpers locales de backtest y descarga (sin credenciales; este fork es PUBLICO)
+backtest_fiel.ps1
+backtest_fiel2.ps1
+descargar_30m_1h.ps1
